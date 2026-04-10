@@ -1,27 +1,25 @@
 """
-TC Acoustic — Telegram Follow Up Inbox Bot
-- Forward messages → logs to Google Sheets
-- /open → lists all open items
+Follow Up Inbox — Telegram Bot
+- Forward messages → logged to Supabase, per user
+- /open → lists your open items
 - /done [n] → marks item n as Done
 - /snooze [n] → snooze item n until a time you specify
-- /delete [n] → permanently removes item n from the sheet
+- /delete [n] → permanently removes item n
 - /help → shows commands
 """
 
 import logging
 import os
-import json
 from datetime import datetime, timezone, timedelta
 import dateparser
-import gspread
-from google.oauth2.service_account import Credentials
+from supabase import create_client, Client
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ConversationHandler, filters, ContextTypes
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-GOOGLE_SHEET_ID    = os.getenv("GOOGLE_SHEET_ID", "")
+SUPABASE_URL       = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY       = os.getenv("SUPABASE_KEY", "")
 INBOX_CHAT_NAME    = "Follow Up Inbox"
-WORKSHEET_NAME     = "TelegramInbox"
 SGT                = timezone(timedelta(hours=8))
 
 WAITING_SNOOZE_TIME = 0
@@ -29,93 +27,61 @@ WAITING_SNOOZE_TIME = 0
 logging.basicConfig(format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Column indices (1-based for gspread)
-COL_TIMESTAMP     = 1
-COL_FROM          = 2
-COL_CHAT          = 3
-COL_MESSAGE       = 4
-COL_MEDIA         = 5
-COL_STATUS        = 6
-COL_NOTES         = 7
-
 
 def validate_config():
-    """Check required env vars are present and credentials are loadable. Exit with a clear message if not."""
+    """Exit with a clear error if required env vars are missing."""
     errors = []
-
     if not TELEGRAM_BOT_TOKEN:
         errors.append("  • TELEGRAM_BOT_TOKEN is not set")
-    if not GOOGLE_SHEET_ID:
-        errors.append("  • GOOGLE_SHEET_ID is not set")
-
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-    if not creds_json and not os.path.exists(creds_file):
-        errors.append(
-            f"  • No Google credentials found. Set GOOGLE_CREDENTIALS_JSON or place credentials.json at '{creds_file}'"
-        )
-    elif creds_json:
-        try:
-            json.loads(creds_json)
-        except json.JSONDecodeError:
-            errors.append("  • GOOGLE_CREDENTIALS_JSON is not valid JSON")
-
+    if not SUPABASE_URL:
+        errors.append("  • SUPABASE_URL is not set")
+    if not SUPABASE_KEY:
+        errors.append("  • SUPABASE_KEY is not set")
     if errors:
         logger.error("Bot cannot start — missing configuration:\n" + "\n".join(errors))
-        logger.error("See the README for setup instructions.")
         raise SystemExit(1)
-
     logger.info("Config OK — all required env vars present.")
 
 
-def get_sheet():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
-        creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=scopes)
-    else:
-        creds = Credentials.from_service_account_file(
-            os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json"), scopes=scopes
-        )
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(GOOGLE_SHEET_ID)
-
-    try:
-        worksheet = sheet.worksheet(WORKSHEET_NAME)
-    except gspread.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title=WORKSHEET_NAME, rows=5000, cols=7)
-        worksheet.append_row([
-            "Timestamp (SGT)", "Originally From", "Original Chat",
-            "Message", "Has Media", "Status", "Notes"
-        ])
-    return worksheet
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_open_items(worksheet):
-    """Return list of (row_index, row_data) for Open rows, plus Snoozed rows past their snooze time."""
-    all_rows = worksheet.get_all_values()
+def get_open_items(user_id: int) -> list:
+    """Return open items plus snoozed items past their snooze time for this user."""
+    sb = get_supabase()
+
+    open_result = (
+        sb.table("inbox")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("status", "Open")
+        .order("id")
+        .execute()
+    )
+    items = list(open_result.data)
+
+    snoozed_result = (
+        sb.table("inbox")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("status", "Snoozed")
+        .order("id")
+        .execute()
+    )
     now = datetime.now(SGT)
-    open_items = []
-    for i, row in enumerate(all_rows[1:], start=2):  # start=2 because row 1 is header
-        if len(row) < 6:
-            continue
-        status = row[COL_STATUS - 1].strip()
-        if status == "Open":
-            open_items.append((i, row))
-        elif status == "Snoozed" and len(row) >= 7:
-            notes = row[COL_NOTES - 1]
-            if notes.startswith("Snoozed until "):
-                try:
-                    snooze_str = notes[len("Snoozed until "):].replace(" SGT", "")
-                    snooze_until = datetime.strptime(snooze_str, "%Y-%m-%d %H:%M").replace(tzinfo=SGT)
-                    if now >= snooze_until:
-                        open_items.append((i, row))
-                except Exception:
-                    pass
-    return open_items
+    for item in snoozed_result.data:
+        notes = item.get("notes", "") or ""
+        if notes.startswith("Snoozed until "):
+            try:
+                snooze_str   = notes[len("Snoozed until "):].replace(" SGT", "")
+                snooze_until = datetime.strptime(snooze_str, "%Y-%m-%d %H:%M").replace(tzinfo=SGT)
+                if now >= snooze_until:
+                    items.append(item)
+            except Exception:
+                pass
+
+    return items
 
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
@@ -123,19 +89,13 @@ def get_open_items(worksheet):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Welcome to Follow Up Inbox!*\n\n"
-        "This bot logs messages from Telegram into a Google Sheet so nothing slips through.\n\n"
-        "*Quick setup (5 steps):*\n\n"
-        "1️⃣ *Telegram bot* — create yours at @BotFather with /newbot. Copy the token into your `TELEGRAM_BOT_TOKEN` env var.\n\n"
-        "2️⃣ *Google Sheet* — create a new sheet, copy its ID from the URL "
-        "(`docs.google.com/spreadsheets/d/*YOUR_ID*/edit`). Set it as `GOOGLE_SHEET_ID`.\n\n"
-        "3️⃣ *Google credentials* — in Google Cloud Console, create a project → enable the Sheets API → "
-        "create a Service Account → download the JSON key. Set its contents as `GOOGLE_CREDENTIALS_JSON`.\n\n"
-        "4️⃣ *Share your sheet* — open the sheet and share it (Editor access) with the service account email "
-        "from the JSON (`client_email` field).\n\n"
-        "5️⃣ *Deploy* — push to Railway (or run locally with `python bot.py`). "
-        "Set the three env vars above in your deployment settings.\n\n"
-        "Once running, forward any Telegram message here and it'll be captured.\n\n"
-        "Type /help to see all commands.",
+        "Forward any Telegram message here and it's saved to your inbox.\n\n"
+        "When you're ready to action things:\n"
+        "/open — see everything waiting\n"
+        "/done 2 — mark item 2 as done\n"
+        "/snooze 2 — hide item 2 until a time you choose\n"
+        "/delete 2 — remove item 2 permanently\n\n"
+        "That's it. Start forwarding.",
         parse_mode="Markdown"
     )
 
@@ -154,30 +114,28 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all open items."""
+    user_id = update.effective_user.id
     try:
-        worksheet = get_sheet()
-        open_items = get_open_items(worksheet)
+        items = get_open_items(user_id)
 
-        if not open_items:
+        if not items:
             await update.message.reply_text("✅ All clear — no open items!")
             return
 
         lines = ["📋 *Open Items:*\n"]
-        for idx, (row_num, row) in enumerate(open_items, start=1):
-            timestamp = row[COL_TIMESTAMP - 1]
-            sender    = row[COL_FROM - 1]
-            message   = row[COL_MESSAGE - 1]
-            # Truncate long messages
-            preview = message[:80] + "..." if len(message) > 80 else message
-            # Flag overdue (more than 1 day old)
+        for idx, item in enumerate(items, start=1):
+            timestamp = item.get("timestamp", "")
+            sender    = item.get("originally_from", "")
+            message   = item.get("message", "")
+            preview   = message[:80] + "..." if len(message) > 80 else message
             try:
-                ts = datetime.strptime(timestamp[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=SGT)
-                age = datetime.now(SGT) - ts
+                ts   = datetime.fromisoformat(timestamp).astimezone(SGT)
+                age  = datetime.now(SGT) - ts
                 flag = "🔴 " if age.days >= 1 else "🟠 " if age.seconds > 3600 * 4 else ""
-            except:
+            except Exception:
                 flag = ""
-            lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {timestamp[:16]}_\n")
+            ts_display = timestamp[:16] if timestamp else ""
+            lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {ts_display}_\n")
 
         lines.append("\nReply /done [n], /snooze [n], or /delete [n]")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -188,32 +146,32 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mark item n as Done."""
+    user_id = update.effective_user.id
     try:
         if not context.args:
             await update.message.reply_text("Usage: /done [number] — e.g. /done 2")
             return
 
-        n = int(context.args[0])
-        worksheet = get_sheet()
-        open_items = get_open_items(worksheet)
+        n     = int(context.args[0])
+        items = get_open_items(user_id)
 
-        if n < 1 or n > len(open_items):
+        if n < 1 or n > len(items):
             await update.message.reply_text(f"⚠️ No item {n}. Use /open to see current list.")
             return
 
-        row_num, row = open_items[n - 1]
-        message_preview = row[COL_MESSAGE - 1][:60]
+        item      = items[n - 1]
         done_time = datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")
 
-        worksheet.update_cell(row_num, COL_STATUS, "Done")
-        worksheet.update_cell(row_num, COL_NOTES, f"Marked done {done_time}")
+        get_supabase().table("inbox").update({
+            "status": "Done",
+            "notes":  f"Marked done {done_time}"
+        }).eq("id", item["id"]).execute()
 
         await update.message.reply_text(
-            f"✅ Done: _{message_preview}_",
+            f"✅ Done: _{item['message'][:60]}_",
             parse_mode="Markdown"
         )
-        logger.info(f"Marked row {row_num} as Done")
+        logger.info(f"Marked item {item['id']} as Done")
 
     except ValueError:
         await update.message.reply_text("Usage: /done [number] — e.g. /done 2")
@@ -223,7 +181,8 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point: /snooze N — asks the user until when."""
+    user_id = update.effective_user.id
+
     if not context.args:
         await update.message.reply_text("Usage: /snooze [number] — e.g. /snooze 2")
         return ConversationHandler.END
@@ -235,20 +194,18 @@ async def cmd_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     try:
-        worksheet = get_sheet()
-        open_items = get_open_items(worksheet)
+        items = get_open_items(user_id)
 
-        if n < 1 or n > len(open_items):
+        if n < 1 or n > len(items):
             await update.message.reply_text(f"⚠️ No item {n}. Use /open to see current list.")
             return ConversationHandler.END
 
-        row_num, row = open_items[n - 1]
-        message_preview = row[COL_MESSAGE - 1][:60]
-        context.user_data["snooze_row"] = row_num
-        context.user_data["snooze_preview"] = message_preview
+        item = items[n - 1]
+        context.user_data["snooze_id"]      = item["id"]
+        context.user_data["snooze_preview"] = item["message"][:60]
 
         await update.message.reply_text(
-            f"⏸ Snooze: _{message_preview}_\n\nUntil when? (e.g. _tomorrow 9am_, _3h_, _Monday_)",
+            f"⏸ Snooze: _{item['message'][:60]}_\n\nUntil when? (e.g. _tomorrow 9am_, _3h_, _Monday_)",
             parse_mode="Markdown"
         )
         return WAITING_SNOOZE_TIME
@@ -260,9 +217,8 @@ async def cmd_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_snooze_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives the snooze-until time from the user and writes it to the sheet."""
-    time_text = update.message.text.strip()
-    row_num = context.user_data.get("snooze_row")
+    time_text       = update.message.text.strip()
+    item_id         = context.user_data.get("snooze_id")
     message_preview = context.user_data.get("snooze_preview", "")
 
     snooze_until = dateparser.parse(
@@ -280,15 +236,16 @@ async def receive_snooze_time(update: Update, context: ContextTypes.DEFAULT_TYPE
     snooze_str = snooze_until.strftime("%Y-%m-%d %H:%M SGT")
 
     try:
-        worksheet = get_sheet()
-        worksheet.update_cell(row_num, COL_STATUS, "Snoozed")
-        worksheet.update_cell(row_num, COL_NOTES, f"Snoozed until {snooze_str}")
+        get_supabase().table("inbox").update({
+            "status": "Snoozed",
+            "notes":  f"Snoozed until {snooze_str}"
+        }).eq("id", item_id).execute()
 
         await update.message.reply_text(
             f"⏸ Snoozed until {snooze_str}: _{message_preview}_",
             parse_mode="Markdown"
         )
-        logger.info(f"Snoozed row {row_num} until {snooze_str}")
+        logger.info(f"Snoozed item {item_id} until {snooze_str}")
     except Exception as e:
         logger.error(f"receive_snooze_time error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
@@ -298,30 +255,27 @@ async def receive_snooze_time(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Permanently delete item n from the sheet."""
+    user_id = update.effective_user.id
     try:
         if not context.args:
             await update.message.reply_text("Usage: /delete [number] — e.g. /delete 2")
             return
 
-        n = int(context.args[0])
-        worksheet = get_sheet()
-        open_items = get_open_items(worksheet)
+        n     = int(context.args[0])
+        items = get_open_items(user_id)
 
-        if n < 1 or n > len(open_items):
+        if n < 1 or n > len(items):
             await update.message.reply_text(f"⚠️ No item {n}. Use /open to see current list.")
             return
 
-        row_num, row = open_items[n - 1]
-        message_preview = row[COL_MESSAGE - 1][:60]
-
-        worksheet.delete_rows(row_num)
+        item = items[n - 1]
+        get_supabase().table("inbox").delete().eq("id", item["id"]).execute()
 
         await update.message.reply_text(
-            f"🗑 Deleted: _{message_preview}_",
+            f"🗑 Deleted: _{item['message'][:60]}_",
             parse_mode="Markdown"
         )
-        logger.info(f"Deleted row {row_num}")
+        logger.info(f"Deleted item {item['id']}")
 
     except ValueError:
         await update.message.reply_text("Usage: /delete [number] — e.g. /delete 2")
@@ -361,16 +315,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         sender = message.from_user
         originally_from = f"{sender.first_name or ''} {sender.last_name or ''}".strip() if sender else "You"
-        original_chat = "Direct note"
+        original_chat   = "Direct note"
 
     text      = message.text or message.caption or "[media only]"
-    has_media = "Yes" if (message.photo or message.video or message.document or message.voice or message.audio) else "No"
-    timestamp = datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S SGT")
+    has_media = bool(message.photo or message.video or message.document or message.voice or message.audio)
+    timestamp = datetime.now(SGT).isoformat()
+    user_id   = update.effective_user.id
 
     try:
-        worksheet = get_sheet()
-        worksheet.append_row([timestamp, originally_from, original_chat, text, has_media, "Open", ""])
-        logger.info(f"Logged [{timestamp}]: {originally_from} — {text[:60]}")
+        get_supabase().table("inbox").insert({
+            "user_id":         user_id,
+            "timestamp":       timestamp,
+            "originally_from": originally_from,
+            "original_chat":   original_chat,
+            "message":         text,
+            "has_media":       has_media,
+            "status":          "Open",
+            "notes":           ""
+        }).execute()
+        logger.info(f"Logged for user {user_id}: {originally_from} — {text[:60]}")
         await message.reply_text("✅ Captured. Use /open to see all open items.")
     except Exception as e:
         logger.error(f"Failed to log: {e}")
@@ -400,7 +363,7 @@ def main():
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
 
-    logger.info("Bot running with /open, /done, /snooze, /delete commands.")
+    logger.info("Bot running.")
     app.run_polling()
 
 if __name__ == "__main__":
