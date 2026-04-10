@@ -39,6 +39,35 @@ COL_STATUS        = 6
 COL_NOTES         = 7
 
 
+def validate_config():
+    """Check required env vars are present and credentials are loadable. Exit with a clear message if not."""
+    errors = []
+
+    if not TELEGRAM_BOT_TOKEN:
+        errors.append("  • TELEGRAM_BOT_TOKEN is not set")
+    if not GOOGLE_SHEET_ID:
+        errors.append("  • GOOGLE_SHEET_ID is not set")
+
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+    if not creds_json and not os.path.exists(creds_file):
+        errors.append(
+            f"  • No Google credentials found. Set GOOGLE_CREDENTIALS_JSON or place credentials.json at '{creds_file}'"
+        )
+    elif creds_json:
+        try:
+            json.loads(creds_json)
+        except json.JSONDecodeError:
+            errors.append("  • GOOGLE_CREDENTIALS_JSON is not valid JSON")
+
+    if errors:
+        logger.error("Bot cannot start — missing configuration:\n" + "\n".join(errors))
+        logger.error("See the README for setup instructions.")
+        raise SystemExit(1)
+
+    logger.info("Config OK — all required env vars present.")
+
+
 def get_sheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -90,6 +119,26 @@ def get_open_items(worksheet):
 
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 *Welcome to Follow Up Inbox!*\n\n"
+        "This bot logs messages from Telegram into a Google Sheet so nothing slips through.\n\n"
+        "*Quick setup (5 steps):*\n\n"
+        "1️⃣ *Telegram bot* — create yours at @BotFather with /newbot. Copy the token into your `TELEGRAM_BOT_TOKEN` env var.\n\n"
+        "2️⃣ *Google Sheet* — create a new sheet, copy its ID from the URL "
+        "(`docs.google.com/spreadsheets/d/*YOUR_ID*/edit`). Set it as `GOOGLE_SHEET_ID`.\n\n"
+        "3️⃣ *Google credentials* — in Google Cloud Console, create a project → enable the Sheets API → "
+        "create a Service Account → download the JSON key. Set its contents as `GOOGLE_CREDENTIALS_JSON`.\n\n"
+        "4️⃣ *Share your sheet* — open the sheet and share it (Editor access) with the service account email "
+        "from the JSON (`client_email` field).\n\n"
+        "5️⃣ *Deploy* — push to Railway (or run locally with `python bot.py`). "
+        "Set the three env vars above in your deployment settings.\n\n"
+        "Once running, forward any Telegram message here and it'll be captured.\n\n"
+        "Type /help to see all commands.",
+        parse_mode="Markdown"
+    )
+
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -332,6 +381,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     logger.info("Starting Follow Up Inbox Bot...")
+    validate_config()
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     snooze_conv = ConversationHandler(
@@ -343,6 +393,7 @@ def main():
     )
 
     app.add_handler(snooze_conv)
+    app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("open",   cmd_open))
     app.add_handler(CommandHandler("done",   cmd_done))
