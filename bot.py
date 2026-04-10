@@ -3,7 +3,7 @@ TC Acoustic — Telegram Follow Up Inbox Bot
 - Forward messages → logs to Google Sheets
 - /open → lists all open items
 - /done [n] → marks item n as Done
-- /snooze [n] → marks item n as Snoozed
+- /delete [n] → permanently removes item n from the sheet
 - /help → shows commands
 """
 
@@ -78,7 +78,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *Follow Up Inbox — Commands*\n\n"
         "/open — list all open items\n"
         "/done [n] — mark item n as done\n"
-        "/snooze [n] — snooze item n\n"
+        "/delete [n] — permanently remove item n\n"
         "/help — show this menu\n\n"
         "To capture: just forward any message here.",
         parse_mode="Markdown"
@@ -111,7 +111,7 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 flag = ""
             lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {timestamp[:16]}_\n")
 
-        lines.append("\nReply /done [n] or /snooze [n]")
+        lines.append("\nReply /done [n] or /delete [n]")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     except Exception as e:
@@ -154,11 +154,11 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 
-async def cmd_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Snooze item n — keeps it open but notes it."""
+async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Permanently delete item n from the sheet."""
     try:
         if not context.args:
-            await update.message.reply_text("Usage: /snooze [number] — e.g. /snooze 2")
+            await update.message.reply_text("Usage: /delete [number] — e.g. /delete 2")
             return
 
         n = int(context.args[0])
@@ -171,21 +171,19 @@ async def cmd_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         row_num, row = open_items[n - 1]
         message_preview = row[COL_MESSAGE - 1][:60]
-        snooze_time = datetime.now(SGT).strftime("%Y-%m-%d %H:%M SGT")
 
-        worksheet.update_cell(row_num, COL_STATUS, "Snoozed")
-        worksheet.update_cell(row_num, COL_NOTES, f"Snoozed {snooze_time}")
+        worksheet.delete_rows(row_num)
 
         await update.message.reply_text(
-            f"⏸ Snoozed: _{message_preview}_\nIt'll stay in the sheet but won't show in /open.",
+            f"🗑 Deleted: _{message_preview}_",
             parse_mode="Markdown"
         )
-        logger.info(f"Marked row {row_num} as Snoozed")
+        logger.info(f"Deleted row {row_num}")
 
     except ValueError:
-        await update.message.reply_text("Usage: /snooze [number] — e.g. /snooze 2")
+        await update.message.reply_text("Usage: /delete [number] — e.g. /delete 2")
     except Exception as e:
-        logger.error(f"cmd_snooze error: {e}")
+        logger.error(f"cmd_delete error: {e}")
         await update.message.reply_text(f"⚠️ Error: {e}")
 
 
@@ -245,10 +243,10 @@ def main():
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("open",   cmd_open))
     app.add_handler(CommandHandler("done",   cmd_done))
-    app.add_handler(CommandHandler("snooze", cmd_snooze))
+    app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(MessageHandler(filters.ALL, handle_message))
 
-    logger.info("Bot running with /open, /done, /snooze commands.")
+    logger.info("Bot running with /open, /done, /delete commands.")
     app.run_polling()
 
 if __name__ == "__main__":
