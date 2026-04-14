@@ -90,6 +90,7 @@ def get_sheet():
         # Auto-add Due Date header if sheet predates this column
         headers = worksheet.row_values(1)
         if len(headers) < 8 or headers[7] != "Due Date":
+            worksheet.resize(cols=8)
             worksheet.update_cell(1, 8, "Due Date")
     except gspread.WorksheetNotFound:
         worksheet = sheet.add_worksheet(title=WORKSHEET_NAME, rows=5000, cols=8)
