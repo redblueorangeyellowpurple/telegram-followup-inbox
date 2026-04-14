@@ -71,3 +71,71 @@ Once Step 4 passes, send people your bot's `@username`. They just message it —
 
 **Snoozed items not resurfacing**
 - They reappear the next time you run `/open` after the snooze time passes — no push notification
+
+---
+
+## Railway Template Listing
+
+*The section below is the Railway marketplace description for this template.*
+
+---
+
+# Deploy and Host Telegram Follow-Up Inbox Bot on Railway
+
+A Telegram bot that turns your chat into a personal follow-up inbox. Forward messages or drop them in a group called "Follow Up Inbox" — then manage everything with simple commands like `/open`, `/done`, `/due`, and `/snooze`.
+
+## About Hosting Telegram Follow-Up Inbox Bot
+
+This bot runs as a single Python worker process on Railway, polling Telegram for new messages. All your data is stored in your own Supabase PostgreSQL database — Railway hosts the bot, Supabase holds the rows. There's no web server, no frontend, and no shared database. Once deployed, the bot runs continuously in the background. You interact with it entirely through Telegram. Setup takes about 10 minutes and requires a free Supabase account and a Telegram bot token from @BotFather.
+
+## Common Use Cases
+
+- Capturing follow-up tasks from Telegram conversations without leaving the app
+- Logging forwarded messages from group chats as actionable inbox items
+- Managing a personal task list with due dates and snooze reminders via Telegram
+
+## Dependencies for Telegram Follow-Up Inbox Bot Hosting
+
+- A Telegram Bot Token (free, from @BotFather)
+- A Supabase project (free tier works) with the `inbox` table created via the provided `schema.sql`
+
+### Deployment Dependencies
+
+- Telegram Bot: https://t.me/BotFather
+- Supabase (database + API): https://supabase.com
+- Schema setup: run `schema.sql` from this repo in your Supabase SQL editor before first deploy
+
+### Implementation Details
+
+Set these 3 environment variables in Railway before deploying:
+
+```
+TELEGRAM_BOT_TOKEN   # from @BotFather
+SUPABASE_URL         # Supabase → Project Settings → API → Project URL
+SUPABASE_KEY         # Supabase → Project Settings → API → service_role secret key
+```
+
+Then run this SQL once in your Supabase SQL editor:
+
+```sql
+CREATE TABLE IF NOT EXISTS inbox (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT        NOT NULL,
+    timestamp       TIMESTAMPTZ   NOT NULL,
+    originally_from TEXT,
+    original_chat   TEXT,
+    message         TEXT,
+    has_media       BOOLEAN       DEFAULT FALSE,
+    status          TEXT          DEFAULT 'Open',
+    notes           TEXT          DEFAULT '',
+    due_date        TIMESTAMPTZ   DEFAULT NULL,
+    created_at      TIMESTAMPTZ   DEFAULT NOW()
+);
+ALTER TABLE inbox ENABLE ROW LEVEL SECURITY;
+```
+
+## Why Deploy Telegram Follow-Up Inbox Bot on Railway?
+
+Railway is a singular platform to deploy your infrastructure stack. Railway will host your infrastructure so you don't have to deal with configuration, while allowing you to vertically and horizontally scale it.
+
+By deploying Telegram Follow-Up Inbox Bot on Railway, you are one step closer to supporting a complete full-stack application with minimal burden. Host your servers, databases, AI agents, and more on Railway.
