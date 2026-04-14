@@ -1,5 +1,7 @@
 # Follow Up Inbox — Telegram Bot
 
+[![Deploy on Railway](https://railway.app/button.svg)](REPLACE_WITH_YOUR_RAILWAY_TEMPLATE_URL)
+
 Never lose track of a Telegram message again.
 
 Forward anything to this bot and it's saved to your inbox. When you're ready to action it, pull up your list with `/open`, mark things done, snooze them, or delete them. Everything is per-user — each person who uses the bot has their own private inbox.
