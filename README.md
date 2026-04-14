@@ -1,6 +1,6 @@
 # Follow Up Inbox — Telegram Bot
 
-[![Deploy on Railway](https://railway.app/button.svg)](REPLACE_WITH_YOUR_RAILWAY_TEMPLATE_URL)
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.com/deploy/telegram-follow-up-inbox-bot)
 
 Never lose track of a Telegram message again.
 
