@@ -25,6 +25,7 @@ WORKSHEET_NAME     = "TelegramInbox"
 SGT                = timezone(timedelta(hours=8))
 
 WAITING_SNOOZE_TIME = 0
+WAITING_DUE_DATE    = 1
 
 logging.basicConfig(format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ COL_MESSAGE       = 4
 COL_MEDIA         = 5
 COL_STATUS        = 6
 COL_NOTES         = 7
+COL_DUE_DATE      = 8
 
 
 def validate_config():
@@ -85,11 +87,15 @@ def get_sheet():
 
     try:
         worksheet = sheet.worksheet(WORKSHEET_NAME)
+        # Auto-add Due Date header if sheet predates this column
+        headers = worksheet.row_values(1)
+        if len(headers) < 8 or headers[7] != "Due Date":
+            worksheet.update_cell(1, 8, "Due Date")
     except gspread.WorksheetNotFound:
-        worksheet = sheet.add_worksheet(title=WORKSHEET_NAME, rows=5000, cols=7)
+        worksheet = sheet.add_worksheet(title=WORKSHEET_NAME, rows=5000, cols=8)
         worksheet.append_row([
             "Timestamp (SGT)", "Originally From", "Original Chat",
-            "Message", "Has Media", "Status", "Notes"
+            "Message", "Has Media", "Status", "Notes", "Due Date"
         ])
     return worksheet
 
@@ -145,6 +151,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *Follow Up Inbox — Commands*\n\n"
         "/open — list all open items\n"
         "/done [n] — mark item n as done\n"
+        "/due [n] [date] — set a due date (e.g. /due 2 Friday)\n"
         "/snooze [n] — snooze item n (you'll be asked until when)\n"
         "/delete [n] — permanently remove item n\n"
         "/help — show this menu\n\n"
@@ -177,7 +184,18 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 flag = "🔴 " if age.days >= 1 else "🟠 " if age.seconds > 3600 * 4 else ""
             except:
                 flag = ""
-            lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {timestamp[:16]}_\n")
+            due_raw = row[COL_DUE_DATE - 1] if len(row) >= COL_DUE_DATE else ""
+            due_part = ""
+            if due_raw:
+                try:
+                    due_dt = datetime.strptime(due_raw[:16], "%Y-%m-%d %H:%M").replace(tzinfo=SGT)
+                    if due_dt < datetime.now(SGT):
+                        due_part = f" · _⚠️ Due {due_dt.strftime('%b %-d')} (overdue)_"
+                    else:
+                        due_part = f" · _📆 Due {due_dt.strftime('%b %-d')}_"
+                except Exception:
+                    pass
+            lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {timestamp[:16]}_{due_part}\n")
 
         lines.append("\nReply /done [n], /snooze [n], or /delete [n]")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
@@ -297,6 +315,103 @@ async def receive_snooze_time(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
+async def cmd_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point: /due N [date] — sets a due date inline or asks if no date given."""
+    if not context.args:
+        await update.message.reply_text("Usage: /due [number] [date] — e.g. /due 2 Friday or /due 2")
+        return ConversationHandler.END
+
+    try:
+        n = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Usage: /due [number] [date] — e.g. /due 2 Friday or /due 2")
+        return ConversationHandler.END
+
+    try:
+        worksheet = get_sheet()
+        open_items = get_open_items(worksheet)
+
+        if n < 1 or n > len(open_items):
+            await update.message.reply_text(f"⚠️ No item {n}. Use /open to see current list.")
+            return ConversationHandler.END
+
+        row_num, row = open_items[n - 1]
+        message_preview = row[COL_MESSAGE - 1][:60]
+
+        # Inline date provided — parse and set immediately
+        if len(context.args) > 1:
+            date_str = " ".join(context.args[1:])
+            due_dt = dateparser.parse(
+                date_str,
+                settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Asia/Singapore", "RETURN_AS_TIMEZONE_AWARE": True}
+            )
+            if not due_dt:
+                await update.message.reply_text(
+                    "⚠️ Couldn't understand that date. Try _Friday_, _Apr 15_, or _tomorrow 5pm_.",
+                    parse_mode="Markdown"
+                )
+                return ConversationHandler.END
+
+            due_str = due_dt.strftime("%Y-%m-%d %H:%M SGT")
+            worksheet.update_cell(row_num, COL_DUE_DATE, due_str)
+            await update.message.reply_text(
+                f"📆 Due {due_dt.strftime('%b %-d')} set for: _{message_preview}_",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Set due date {due_str} on row {row_num}")
+            return ConversationHandler.END
+
+        # No date provided — ask
+        context.user_data["due_row"]     = row_num
+        context.user_data["due_preview"] = message_preview
+        await update.message.reply_text(
+            f"📆 Set due date for: _{message_preview}_\n\nWhen is this due? (e.g. _Friday_, _Apr 15_, _tomorrow 5pm_)",
+            parse_mode="Markdown"
+        )
+        return WAITING_DUE_DATE
+
+    except Exception as e:
+        logger.error(f"cmd_due error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
+        return ConversationHandler.END
+
+
+async def receive_due_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives the due date from the user and writes it to the sheet."""
+    time_text       = update.message.text.strip()
+    row_num         = context.user_data.get("due_row")
+    message_preview = context.user_data.get("due_preview", "")
+
+    due_dt = dateparser.parse(
+        time_text,
+        settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Asia/Singapore", "RETURN_AS_TIMEZONE_AWARE": True}
+    )
+
+    if not due_dt:
+        await update.message.reply_text(
+            "⚠️ Couldn't understand that. Try _Friday_, _Apr 15_, or _tomorrow 5pm_.",
+            parse_mode="Markdown"
+        )
+        return WAITING_DUE_DATE
+
+    due_str = due_dt.strftime("%Y-%m-%d %H:%M SGT")
+
+    try:
+        worksheet = get_sheet()
+        worksheet.update_cell(row_num, COL_DUE_DATE, due_str)
+        await update.message.reply_text(
+            f"📆 Due {due_dt.strftime('%b %-d')} set for: _{message_preview}_",
+            parse_mode="Markdown"
+        )
+        logger.info(f"Set due date {due_str} on row {row_num}")
+    except Exception as e:
+        logger.error(f"receive_due_date error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Permanently delete item n from the sheet."""
     try:
@@ -369,7 +484,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         worksheet = get_sheet()
-        worksheet.append_row([timestamp, originally_from, original_chat, text, has_media, "Open", ""])
+        worksheet.append_row([timestamp, originally_from, original_chat, text, has_media, "Open", "", ""])
         logger.info(f"Logged [{timestamp}]: {originally_from} — {text[:60]}")
         await message.reply_text("✅ Captured. Use /open to see all open items.")
     except Exception as e:
@@ -392,7 +507,16 @@ def main():
         fallbacks=[],
     )
 
+    due_conv = ConversationHandler(
+        entry_points=[CommandHandler("due", cmd_due)],
+        states={
+            WAITING_DUE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_due_date)],
+        },
+        fallbacks=[],
+    )
+
     app.add_handler(snooze_conv)
+    app.add_handler(due_conv)
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("open",   cmd_open))
