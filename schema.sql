@@ -10,8 +10,12 @@ CREATE TABLE IF NOT EXISTS inbox (
     has_media       BOOLEAN       DEFAULT FALSE,
     status          TEXT          DEFAULT 'Open',
     notes           TEXT          DEFAULT '',
+    due_date        TIMESTAMPTZ   DEFAULT NULL,
     created_at      TIMESTAMPTZ   DEFAULT NOW()
 );
 
 -- Speeds up per-user queries for /open
 CREATE INDEX IF NOT EXISTS idx_inbox_user_status ON inbox (user_id, status);
+
+-- Run this if the table already exists (adds due_date to existing installs)
+ALTER TABLE inbox ADD COLUMN IF NOT EXISTS due_date TIMESTAMPTZ DEFAULT NULL;

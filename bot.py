@@ -23,6 +23,7 @@ INBOX_CHAT_NAME    = "Follow Up Inbox"
 SGT                = timezone(timedelta(hours=8))
 
 WAITING_SNOOZE_TIME = 0
+WAITING_DUE_DATE    = 1
 
 logging.basicConfig(format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,6 +94,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "When you're ready to action things:\n"
         "/open — see everything waiting\n"
         "/done 2 — mark item 2 as done\n"
+        "/due 2 Friday — set a due date on item 2\n"
         "/snooze 2 — hide item 2 until a time you choose\n"
         "/delete 2 — remove item 2 permanently\n\n"
         "That's it. Start forwarding.",
@@ -105,6 +107,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 *Follow Up Inbox — Commands*\n\n"
         "/open — list all open items\n"
         "/done [n] — mark item n as done\n"
+        "/due [n] [date] — set a due date (e.g. /due 2 Friday)\n"
         "/snooze [n] — snooze item n (you'll be asked until when)\n"
         "/delete [n] — permanently remove item n\n"
         "/help — show this menu\n\n"
@@ -135,9 +138,20 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 flag = ""
             ts_display = timestamp[:16] if timestamp else ""
-            lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {ts_display}_\n")
+            due_raw  = item.get("due_date") or ""
+            due_part = ""
+            if due_raw:
+                try:
+                    due_dt = datetime.fromisoformat(due_raw).astimezone(SGT)
+                    if due_dt < datetime.now(SGT):
+                        due_part = f" · _⚠️ Due {due_dt.strftime('%b %-d')} (overdue)_"
+                    else:
+                        due_part = f" · _📆 Due {due_dt.strftime('%b %-d')}_"
+                except Exception:
+                    pass
+            lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {ts_display}_{due_part}\n")
 
-        lines.append("\nReply /done [n], /snooze [n], or /delete [n]")
+        lines.append("\nReply /done [n], /due [n], /snooze [n], or /delete [n]")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     except Exception as e:
@@ -254,6 +268,104 @@ async def receive_snooze_time(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
+async def cmd_due(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point: /due N [date] — sets a due date inline or asks if no date given."""
+    user_id = update.effective_user.id
+
+    if not context.args:
+        await update.message.reply_text("Usage: /due [number] [date] — e.g. /due 2 Friday or /due 2")
+        return ConversationHandler.END
+
+    try:
+        n = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Usage: /due [number] [date] — e.g. /due 2 Friday or /due 2")
+        return ConversationHandler.END
+
+    try:
+        items = get_open_items(user_id)
+
+        if n < 1 or n > len(items):
+            await update.message.reply_text(f"⚠️ No item {n}. Use /open to see current list.")
+            return ConversationHandler.END
+
+        item            = items[n - 1]
+        message_preview = item["message"][:60]
+
+        # Inline date provided — parse and set immediately
+        if len(context.args) > 1:
+            date_str = " ".join(context.args[1:])
+            due_dt   = dateparser.parse(
+                date_str,
+                settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Asia/Singapore", "RETURN_AS_TIMEZONE_AWARE": True}
+            )
+            if not due_dt:
+                await update.message.reply_text(
+                    "⚠️ Couldn't understand that date. Try _Friday_, _Apr 15_, or _tomorrow 5pm_.",
+                    parse_mode="Markdown"
+                )
+                return ConversationHandler.END
+
+            get_supabase().table("inbox").update({
+                "due_date": due_dt.isoformat()
+            }).eq("id", item["id"]).execute()
+            await update.message.reply_text(
+                f"📆 Due {due_dt.strftime('%b %-d')} set for: _{message_preview}_",
+                parse_mode="Markdown"
+            )
+            logger.info(f"Set due date on item {item['id']}")
+            return ConversationHandler.END
+
+        # No date provided — ask
+        context.user_data["due_id"]      = item["id"]
+        context.user_data["due_preview"] = message_preview
+        await update.message.reply_text(
+            f"📆 Set due date for: _{message_preview}_\n\nWhen is this due? (e.g. _Friday_, _Apr 15_, _tomorrow 5pm_)",
+            parse_mode="Markdown"
+        )
+        return WAITING_DUE_DATE
+
+    except Exception as e:
+        logger.error(f"cmd_due error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
+        return ConversationHandler.END
+
+
+async def receive_due_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receives the due date from the user and writes it to Supabase."""
+    time_text       = update.message.text.strip()
+    item_id         = context.user_data.get("due_id")
+    message_preview = context.user_data.get("due_preview", "")
+
+    due_dt = dateparser.parse(
+        time_text,
+        settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Asia/Singapore", "RETURN_AS_TIMEZONE_AWARE": True}
+    )
+
+    if not due_dt:
+        await update.message.reply_text(
+            "⚠️ Couldn't understand that. Try _Friday_, _Apr 15_, or _tomorrow 5pm_.",
+            parse_mode="Markdown"
+        )
+        return WAITING_DUE_DATE
+
+    try:
+        get_supabase().table("inbox").update({
+            "due_date": due_dt.isoformat()
+        }).eq("id", item_id).execute()
+        await update.message.reply_text(
+            f"📆 Due {due_dt.strftime('%b %-d')} set for: _{message_preview}_",
+            parse_mode="Markdown"
+        )
+        logger.info(f"Set due date on item {item_id}")
+    except Exception as e:
+        logger.error(f"receive_due_date error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {e}")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
@@ -355,7 +467,16 @@ def main():
         fallbacks=[],
     )
 
+    due_conv = ConversationHandler(
+        entry_points=[CommandHandler("due", cmd_due)],
+        states={
+            WAITING_DUE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_due_date)],
+        },
+        fallbacks=[],
+    )
+
     app.add_handler(snooze_conv)
+    app.add_handler(due_conv)
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("open",   cmd_open))
