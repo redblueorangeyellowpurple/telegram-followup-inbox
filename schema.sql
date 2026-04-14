@@ -19,3 +19,9 @@ CREATE INDEX IF NOT EXISTS idx_inbox_user_status ON inbox (user_id, status);
 
 -- Run this if the table already exists (adds due_date to existing installs)
 ALTER TABLE inbox ADD COLUMN IF NOT EXISTS due_date TIMESTAMPTZ DEFAULT NULL;
+
+-- Row Level Security
+-- Locks down the table so only the service_role key (used by the bot) can
+-- read or write. The anon/publishable key gets no access at all.
+-- The bot requires no code changes — service_role bypasses RLS automatically.
+ALTER TABLE inbox ENABLE ROW LEVEL SECURITY;
