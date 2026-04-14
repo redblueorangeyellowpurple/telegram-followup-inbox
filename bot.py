@@ -198,7 +198,7 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {timestamp[:16]}_{due_part}\n")
 
-        lines.append("\nReply /done [n], /snooze [n], or /delete [n]")
+        lines.append("\nReply /done [n], /due [n], /snooze [n], or /delete [n]")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     except Exception as e:
