@@ -194,6 +194,7 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         due_part = f" · _⚠️ Due {due_dt.strftime('%b %-d')} (overdue)_"
                     else:
                         due_part = f" · _📆 Due {due_dt.strftime('%b %-d')}_"
+                        flag = ""  # suppress age flag when a future due date is set
                 except Exception:
                     pass
             lines.append(f"{flag}*{idx}.* {preview}\n   _From: {sender}_\n   _📅 {timestamp[:16]}_{due_part}\n")
