@@ -176,8 +176,13 @@ async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timestamp = row[COL_TIMESTAMP - 1]
             sender    = row[COL_FROM - 1]
             message   = row[COL_MESSAGE - 1]
-            # Truncate long messages
-            preview = message[:80] + "..." if len(message) > 80 else message
+            # Truncate long messages; escape Markdown special chars in user content
+            def esc(t):
+                for ch in ["_", "*", "`", "["]:
+                    t = t.replace(ch, f"\\{ch}")
+                return t
+            preview = esc(message[:80] + "..." if len(message) > 80 else message)
+            sender  = esc(sender)
             # Flag overdue (more than 1 day old)
             try:
                 ts = datetime.strptime(timestamp[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=SGT)
